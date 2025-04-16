@@ -6,8 +6,11 @@ DEFAULT_STATE = {
     "active_trade": False,
     "position_side": None,
     "entry_price": None,
-    "stop_loss_price": None,
-    "target_price": None
+    "stop_loss_price": None,  # Initial stop loss
+    "target_price": None,
+    "trailing_stop_level": None,  # Explicit trailing stop
+    "highest": None,
+    "lowest": None
 }
 STATE_FILE = 'state_rsidiv.json'
 
@@ -31,14 +34,10 @@ def get_state():
     try:
         with open(state_file, 'r') as f:
             state = json.load(f)
-            if not isinstance(state, dict) or \
-               'active_trade' not in state or \
-               'position_side' not in state or \
-               'entry_price' not in state or \
-               'stop_loss_price' not in state or \
-               'target_price' not in state:
-                logging.warning(f"Invalid state file format in {state_file}. Using default state.")
-                return DEFAULT_STATE.copy()
+            # Validate state keys
+            for k in DEFAULT_STATE:
+                if k not in state:
+                    state[k] = DEFAULT_STATE[k]
             return state
     except json.JSONDecodeError:
         logging.error(f"Error decoding JSON from {state_file}. Using default state.")
@@ -49,6 +48,10 @@ def get_state():
 
 def set_state(new_state):
     state_file = get_state_file_path()
+    # Ensure all keys are present
+    for k in DEFAULT_STATE:
+        if k not in new_state:
+            new_state[k] = DEFAULT_STATE[k]
     try:
         with open(state_file, 'w') as f:
             json.dump(new_state, f, indent=4)
