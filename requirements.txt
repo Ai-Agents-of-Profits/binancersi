@@ -1,0 +1,8 @@
+ccxt
+pandas
+pandas-ta
+schedule
+python-dotenv
+colorama
+numpy==1.26.4
+scipy
