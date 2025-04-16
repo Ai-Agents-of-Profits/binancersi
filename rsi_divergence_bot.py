@@ -25,7 +25,7 @@ logging.basicConfig(
 # --- Configuration ---
 SYMBOL = 'BERA/USDT' # Binance symbol format
 TIMEFRAME = '1h'
-ORDER_SIZE_USD = 1400  # Match your backtest
+ORDER_SIZE_USD = 25  # Match your backtest
 FETCH_LIMIT = 200
 SCHEDULE_INTERVAL_SECONDS = 60
 USE_TESTNET = False
@@ -180,6 +180,14 @@ def bot_logic():
             if close_reason:
                 print(f"\n{Fore.RED}{Style.BRIGHT}EXIT SIGNAL: {close_reason}. Closing {state['position_side']} position.{Style.RESET_ALL}")
                 logging.info(f"EXIT SIGNAL: {close_reason}. Closing {state['position_side']} position.")
+                # Cancel SL/TP orders before market close
+                for oid in [state.get('sl_order_id'), state.get('tp_order_id')]:
+                    if oid:
+                        try:
+                            exchange.cancel_order(oid, SYMBOL)
+                            logging.info(f"Cancelled open order: {oid}")
+                        except Exception as e:
+                            logging.warning(f"Failed to cancel order {oid}: {e}")
                 # Market close
                 side = 'sell' if is_long else 'buy'
                 try:
@@ -244,6 +252,36 @@ def bot_logic():
                 stop_loss_price = float(f"{stop_loss_price:.{price_decimals}f}")
                 target_price = float(f"{target_price:.{price_decimals}f}")
                 trailing_stop_level = float(f"{trailing_stop_level:.{price_decimals}f}")
+                # --- Place SL/TP on Exchange ---
+                sl_order = None
+                tp_order = None
+                try:
+                    if side == 'buy':
+                        # Stop loss (sell stop market)
+                        sl_order = exchange.create_order(
+                            SYMBOL, 'STOP_MARKET', 'sell', amount_float, None,
+                            {'stopPrice': stop_loss_price, 'reduceOnly': True}
+                        )
+                        # Take profit (sell limit)
+                        tp_order = exchange.create_order(
+                            SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', amount_float, None,
+                            {'stopPrice': target_price, 'reduceOnly': True}
+                        )
+                    else:
+                        # Stop loss (buy stop market)
+                        sl_order = exchange.create_order(
+                            SYMBOL, 'STOP_MARKET', 'buy', amount_float, None,
+                            {'stopPrice': stop_loss_price, 'reduceOnly': True}
+                        )
+                        # Take profit (buy limit)
+                        tp_order = exchange.create_order(
+                            SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', amount_float, None,
+                            {'stopPrice': target_price, 'reduceOnly': True}
+                        )
+                    logging.info(f"Exchange SL order placed: {sl_order.get('id', 'N/A')}")
+                    logging.info(f"Exchange TP order placed: {tp_order.get('id', 'N/A')}")
+                except Exception as e:
+                    logging.error(f"Failed to place SL/TP orders on exchange: {e}")
                 new_state = {
                     "active_trade": True,
                     "position_side": pos_side,
@@ -252,7 +290,9 @@ def bot_logic():
                     "target_price": target_price,
                     "highest": highest,
                     "lowest": lowest,
-                    "trailing_stop_level": trailing_stop_level
+                    "trailing_stop_level": trailing_stop_level,
+                    "sl_order_id": sl_order.get('id') if sl_order else None,
+                    "tp_order_id": tp_order.get('id') if tp_order else None
                 }
                 set_state(new_state)
                 print(f"{Fore.YELLOW}Stop loss set at: {stop_loss_price:.4f}, Target: {target_price:.4f}, Initial Trailing Stop: {trailing_stop_level:.4f}")
@@ -260,7 +300,7 @@ def bot_logic():
                 time.sleep(5)
             except ccxt.InsufficientFunds as e:
                 logging.error(f"Insufficient funds for entry: {e}")
-                print(f"{Fore.RED}{Style.BRIGHT}Insufficient fundss for entry: {e}{Style.RESET_ALL}")
+                print(f"{Fore.RED}{Style.BRIGHT}Insufficient funds for entry: {e}{Style.RESET_ALL}")
             except Exception as e:
                 logging.error(f"Entry error: {e}", exc_info=True)
                 print(f"{Fore.RED}{Style.BRIGHT}Entry error: {e}{Style.RESET_ALL}")
