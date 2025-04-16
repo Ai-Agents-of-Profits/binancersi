@@ -25,7 +25,7 @@ logging.basicConfig(
 # --- Configuration ---
 SYMBOL = 'BERA/USDT' # Binance symbol format
 TIMEFRAME = '1h'
-ORDER_SIZE_USD = 25  # Match your backtest
+ORDER_SIZE_USD = 1400  # Match your backtest
 FETCH_LIMIT = 200
 SCHEDULE_INTERVAL_SECONDS = 60
 USE_TESTNET = False
@@ -108,10 +108,12 @@ def bot_logic():
     print(f"\n{Fore.CYAN}[{now}] {Style.BRIGHT}Running RSI Divergence Cycle [{TIMEFRAME}] {Style.RESET_ALL}")
     logging.info(f"--- Running RSI Divergence Cycle [{TIMEFRAME}] ---")
     state = get_state()
+    if state.get('closing', False):
+        logging.info("Bot is currently closing a position. Skipping cycle.")
+        return
     try:
         # --- Sync with Exchange --- #
         positions = exchange.fetch_positions(symbols=[SYMBOL])
-        # Robust symbol matching for Binance Futures
         exch_pos = next(
             (p for p in positions if p['symbol'] == SYMBOL or p['symbol'].replace(':USDT', '') == SYMBOL or SYMBOL in p['symbol']),
             None
@@ -146,18 +148,16 @@ def bot_logic():
             entry_price = state.get('entry_price')
             is_long = state['position_side'] == 'long'
             close_reason = None
-            # --- Trailing Stop Logic ---
             highest = state.get('highest')
             lowest = state.get('lowest')
             trailing_stop_level = state.get('trailing_stop_level')
             trailing_stop_updated = False
+            atr_at_entry = state.get('atr_at_entry', atr_val)
             if is_long:
-                # Update highest price since entry
                 if highest is None or price > highest:
                     highest = price
-                trail_dist = max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
+                trail_dist = max(ATR_MULTIPLIER * atr_at_entry, price * STOP_LOSS_PCT)
                 new_trailing_stop = highest - trail_dist
-                # Only move trailing stop up
                 if trailing_stop_level is None or new_trailing_stop > trailing_stop_level:
                     logging.info(f"Trailing stop updated (long): {trailing_stop_level} -> {new_trailing_stop} (highest: {highest}, trail_dist: {trail_dist})")
                     trailing_stop_level = new_trailing_stop
@@ -169,9 +169,8 @@ def bot_logic():
             else:
                 if lowest is None or price < lowest:
                     lowest = price
-                trail_dist = max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
+                trail_dist = max(ATR_MULTIPLIER * atr_at_entry, price * STOP_LOSS_PCT)
                 new_trailing_stop = lowest + trail_dist
-                # Only move trailing stop down
                 if trailing_stop_level is None or new_trailing_stop < trailing_stop_level:
                     logging.info(f"Trailing stop updated (short): {trailing_stop_level} -> {new_trailing_stop} (lowest: {lowest}, trail_dist: {trail_dist})")
                     trailing_stop_level = new_trailing_stop
@@ -181,9 +180,11 @@ def bot_logic():
                 elif price <= target_price:
                     close_reason = f"PROFIT TARGET Hit! Price={price:.4f}, TP={target_price:.4f}"
             if close_reason:
+                # Prevent double close
+                state['closing'] = True
+                set_state(state)
                 print(f"\n{Fore.RED}{Style.BRIGHT}EXIT SIGNAL: {close_reason}. Closing {state['position_side']} position.{Style.RESET_ALL}")
                 logging.info(f"EXIT SIGNAL: {close_reason}. Closing {state['position_side']} position.")
-                # Cancel SL/TP orders before market close
                 for oid in [state.get('sl_order_id'), state.get('tp_order_id')]:
                     if oid:
                         try:
@@ -191,7 +192,6 @@ def bot_logic():
                             logging.info(f"Cancelled open order: {oid}")
                         except Exception as e:
                             logging.warning(f"Failed to cancel order {oid}: {e}")
-                # Market close
                 side = 'sell' if is_long else 'buy'
                 try:
                     params = {'reduceOnly': True}
@@ -203,11 +203,11 @@ def bot_logic():
                     logging.error(f"Market close FAILED: {e}")
                 return
             else:
-                # Save trailing stop/highest/lowest to state
                 state['stop_loss_price'] = stop_loss_price
                 state['highest'] = highest
                 state['lowest'] = lowest
                 state['trailing_stop_level'] = trailing_stop_level
+                state['atr_at_entry'] = atr_at_entry
                 set_state(state)
                 profit_pct = ((price / entry_price - 1) * 100) if is_long else ((entry_price / price - 1) * 100)
                 profit_color = Fore.GREEN if profit_pct > 0 else Fore.RED
@@ -226,27 +226,23 @@ def bot_logic():
                 logging.info("No entry conditions met.")
                 return
             try:
-                # --- Robust order sizing: ensure min amount and min notional ---
                 min_amount = MIN_AMOUNT
                 min_notional = MIN_NOTIONAL
                 price_decimals = step_to_decimals(PRICE_PRECISION)
                 amount_decimals = step_to_decimals(AMOUNT_PRECISION)
-                # Calculate minimum USD size to meet notional
                 min_usd = min_notional * 1.1
                 order_size_usd = max(ORDER_SIZE_USD, min_usd)
                 amount = order_size_usd / price
                 amount = float(f"{amount:.{amount_decimals}f}")
-                # Final checks
                 if amount < min_amount or (amount * price) < min_notional:
                     logging.error(f"Calculated amount {amount} (notional ${amount*price:.2f}) is below Binance minimums (amount {min_amount}, notional ${min_notional}). Skipping entry.")
                     print(f"{Fore.RED}{Style.BRIGHT}Order size too small for Binance minimums. Skipping entry.{Style.RESET_ALL}")
                     return
                 logging.info(f"Attempting {side.upper()} entry: {amount} {SYMBOL.split('/')[0]} @ Market (min amount: {min_amount}, min notional: {min_notional})")
-                params = {} # No special params needed for Binance entry
+                params = {} 
                 order = exchange.create_market_order(SYMBOL, side, amount, params=params)
                 logging.info(f"Entry order placed: {order.get('id', 'N/A')}")
                 print(f"{Fore.GREEN}Entry order placed: {order.get('id', 'N/A')}")
-                # Set stop loss and target
                 if side == 'buy':
                     stop_loss_price = price - max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                     target_price = price + price * PROFIT_TARGET_PCT
@@ -262,36 +258,6 @@ def bot_logic():
                 stop_loss_price = float(f"{stop_loss_price:.{price_decimals}f}")
                 target_price = float(f"{target_price:.{price_decimals}f}")
                 trailing_stop_level = float(f"{trailing_stop_level:.{price_decimals}f}")
-                # --- Place SL/TP on Exchange ---
-                sl_order = None
-                tp_order = None
-                try:
-                    if side == 'buy':
-                        # Stop loss (sell stop market)
-                        sl_order = exchange.create_order(
-                            SYMBOL, 'STOP_MARKET', 'sell', amount, None,
-                            {'stopPrice': stop_loss_price, 'reduceOnly': True}
-                        )
-                        # Take profit (sell limit)
-                        tp_order = exchange.create_order(
-                            SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', amount, None,
-                            {'stopPrice': target_price, 'reduceOnly': True}
-                        )
-                    else:
-                        # Stop loss (buy stop market)
-                        sl_order = exchange.create_order(
-                            SYMBOL, 'STOP_MARKET', 'buy', amount, None,
-                            {'stopPrice': stop_loss_price, 'reduceOnly': True}
-                        )
-                        # Take profit (buy limit)
-                        tp_order = exchange.create_order(
-                            SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', amount, None,
-                            {'stopPrice': target_price, 'reduceOnly': True}
-                        )
-                    logging.info(f"Exchange SL order placed: {sl_order.get('id', 'N/A')}")
-                    logging.info(f"Exchange TP order placed: {tp_order.get('id', 'N/A')}")
-                except Exception as e:
-                    logging.error(f"Failed to place SL/TP orders on exchange: {e}")
                 new_state = {
                     "active_trade": True,
                     "position_side": pos_side,
@@ -301,8 +267,10 @@ def bot_logic():
                     "highest": highest,
                     "lowest": lowest,
                     "trailing_stop_level": trailing_stop_level,
-                    "sl_order_id": sl_order.get('id') if sl_order else None,
-                    "tp_order_id": tp_order.get('id') if tp_order else None
+                    "sl_order_id": None,
+                    "tp_order_id": None,
+                    "atr_at_entry": atr_val,
+                    "closing": False
                 }
                 set_state(new_state)
                 print(f"{Fore.YELLOW}Stop loss set at: {stop_loss_price:.4f}, Target: {target_price:.4f}, Initial Trailing Stop: {trailing_stop_level:.4f}")
@@ -319,6 +287,94 @@ def bot_logic():
         print(f"{Fore.RED}{Style.BRIGHT}Unexpected Error in bot_logic: {e}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[{datetime.now().strftime('%H:%M:%S')}] Cycle completed {Style.RESET_ALL}")
     logging.info(f"--- RSI Divergence Cycle End ---\n")
+
+# --- Fast Trailing Stop Checker Thread ---
+def trailing_stop_checker():
+    try:
+        state = get_state()
+        if not state.get('active_trade', False) or state.get('closing', False):
+            return
+        ticker = exchange.fetch_ticker(SYMBOL)
+        price = ticker['last']
+        atr_at_entry = state.get('atr_at_entry')
+        if atr_at_entry is None:
+            # fallback: fetch candles and recalc ATR
+            df = fetch_candles(exchange, SYMBOL, TIMEFRAME, 20)
+            df = compute_indicators(df, rsi_length=RSI_LENGTH, atr_length=ATR_LENGTH)
+            atr_at_entry = df['ATR'].iloc[-1]
+        is_long = state['position_side'] == 'long'
+        highest = state.get('highest')
+        lowest = state.get('lowest')
+        trailing_stop_level = state.get('trailing_stop_level')
+        close_reason = None
+        if is_long:
+            if highest is None or price > highest:
+                highest = price
+            trail_dist = max(ATR_MULTIPLIER * atr_at_entry, price * STOP_LOSS_PCT)
+            new_trailing_stop = highest - trail_dist
+            if trailing_stop_level is None or new_trailing_stop > trailing_stop_level:
+                trailing_stop_level = new_trailing_stop
+            if price <= trailing_stop_level:
+                close_reason = f"TRAILING STOP LOSS Hit (fast thread)! Price={price:.4f}, TSL={trailing_stop_level:.4f}"
+        else:
+            if lowest is None or price < lowest:
+                lowest = price
+            trail_dist = max(ATR_MULTIPLIER * atr_at_entry, price * STOP_LOSS_PCT)
+            new_trailing_stop = lowest + trail_dist
+            if trailing_stop_level is None or new_trailing_stop < trailing_stop_level:
+                trailing_stop_level = new_trailing_stop
+            if price >= trailing_stop_level:
+                close_reason = f"TRAILING STOP LOSS Hit (fast thread)! Price={price:.4f}, TSL={trailing_stop_level:.4f}"
+        if close_reason:
+            # Prevent double close
+            state['closing'] = True
+            set_state(state)
+            print(f"\n{Fore.RED}{Style.BRIGHT}{close_reason} Closing {state['position_side']} position.{Style.RESET_ALL}")
+            logging.info(close_reason)
+            for oid in [state.get('sl_order_id'), state.get('tp_order_id')]:
+                if oid:
+                    try:
+                        exchange.cancel_order(oid, SYMBOL)
+                        logging.info(f"Cancelled open order: {oid}")
+                    except Exception as e:
+                        logging.warning(f"Failed to cancel order {oid}: {e}")
+            side = 'sell' if is_long else 'buy'
+            try:
+                params = {'reduceOnly': True}
+                positions = exchange.fetch_positions(symbols=[SYMBOL])
+                exch_pos = next(
+                    (p for p in positions if p['symbol'] == SYMBOL or p['symbol'].replace(':USDT', '') == SYMBOL or SYMBOL in p['symbol']),
+                    None
+                )
+                exch_size = abs(float(exch_pos['info'].get('positionAmt', '0'))) if exch_pos else 0
+                if exch_size > 0:
+                    order = exchange.create_market_order(SYMBOL, side, exch_size, params=params)
+                    logging.info(f"Market close order placed: {order.get('id', 'N/A')}")
+                reset_state()
+                print(f"{Fore.MAGENTA}Position closed by fast trailing stop. State reset.{Style.RESET_ALL}")
+            except Exception as e:
+                logging.error(f"Market close FAILED (fast TS): {e}")
+        else:
+            state['highest'] = highest
+            state['lowest'] = lowest
+            state['trailing_stop_level'] = trailing_stop_level
+            set_state(state)
+    except Exception as e:
+        logging.error(f"TS Checker error: {e}")
+
+def start_trailing_stop_thread():
+    import threading
+    def loop():
+        while True:
+            try:
+                trailing_stop_checker()
+            except Exception as e:
+                logging.error(f"TS Checker thread error: {e}")
+            time.sleep(5)  # Check every 5 seconds
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+start_trailing_stop_thread()
 
 print(f"\n{Fore.GREEN}{Style.BRIGHT}Starting RSI Divergence Bot for Binance Futures{Style.RESET_ALL}")
 print(f"{Fore.CYAN}Checking conditions every {SCHEDULE_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.{Style.RESET_ALL}\n")
