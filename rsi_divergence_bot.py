@@ -108,8 +108,11 @@ def bot_logic():
     try:
         # --- Sync with Exchange --- #
         positions = exchange.fetch_positions(symbols=[SYMBOL])
-        # Binance returns a list, find our symbol
-        exch_pos = next((p for p in positions if p['symbol'] == SYMBOL), None)
+        # Robust symbol matching for Binance Futures
+        exch_pos = next(
+            (p for p in positions if p['symbol'] == SYMBOL or p['symbol'].replace(':USDT', '') == SYMBOL or SYMBOL in p['symbol']),
+            None
+        )
         exch_size_str = exch_pos['info'].get('positionAmt', '0') if exch_pos else '0'
         exch_size = float(exch_size_str) # Can be negative for short
         exch_in_pos = abs(exch_size) > 0
@@ -141,32 +144,37 @@ def bot_logic():
             is_long = state['position_side'] == 'long'
             close_reason = None
             # --- Trailing Stop Logic ---
-            # We'll store highest/lowest in state for persistence
             highest = state.get('highest')
             lowest = state.get('lowest')
+            trailing_stop_level = state.get('trailing_stop_level')
+            trailing_stop_updated = False
             if is_long:
                 # Update highest price since entry
                 if highest is None or price > highest:
                     highest = price
                 trail_dist = max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
-                new_stop = highest - trail_dist
-                # Only move stop up
-                if stop_loss_price is None or new_stop > stop_loss_price:
-                    stop_loss_price = new_stop
-                if price <= stop_loss_price:
-                    close_reason = f"TRAILING STOP LOSS Hit! Price={price:.4f}, SL={stop_loss_price:.4f}"
+                new_trailing_stop = highest - trail_dist
+                # Only move trailing stop up
+                if trailing_stop_level is None or new_trailing_stop > trailing_stop_level:
+                    logging.info(f"Trailing stop updated (long): {trailing_stop_level} -> {new_trailing_stop} (highest: {highest}, trail_dist: {trail_dist})")
+                    trailing_stop_level = new_trailing_stop
+                    trailing_stop_updated = True
+                if price <= trailing_stop_level:
+                    close_reason = f"TRAILING STOP LOSS Hit! Price={price:.4f}, TSL={trailing_stop_level:.4f}"
                 elif price >= target_price:
                     close_reason = f"PROFIT TARGET Hit! Price={price:.4f}, TP={target_price:.4f}"
             else:
                 if lowest is None or price < lowest:
                     lowest = price
                 trail_dist = max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
-                new_stop = lowest + trail_dist
-                # Only move stop down
-                if stop_loss_price is None or new_stop < stop_loss_price:
-                    stop_loss_price = new_stop
-                if price >= stop_loss_price:
-                    close_reason = f"TRAILING STOP LOSS Hit! Price={price:.4f}, SL={stop_loss_price:.4f}"
+                new_trailing_stop = lowest + trail_dist
+                # Only move trailing stop down
+                if trailing_stop_level is None or new_trailing_stop < trailing_stop_level:
+                    logging.info(f"Trailing stop updated (short): {trailing_stop_level} -> {new_trailing_stop} (lowest: {lowest}, trail_dist: {trail_dist})")
+                    trailing_stop_level = new_trailing_stop
+                    trailing_stop_updated = True
+                if price >= trailing_stop_level:
+                    close_reason = f"TRAILING STOP LOSS Hit! Price={price:.4f}, TSL={trailing_stop_level:.4f}"
                 elif price <= target_price:
                     close_reason = f"PROFIT TARGET Hit! Price={price:.4f}, TP={target_price:.4f}"
             if close_reason:
@@ -188,10 +196,11 @@ def bot_logic():
                 state['stop_loss_price'] = stop_loss_price
                 state['highest'] = highest
                 state['lowest'] = lowest
+                state['trailing_stop_level'] = trailing_stop_level
                 set_state(state)
                 profit_pct = ((price / entry_price - 1) * 100) if is_long else ((entry_price / price - 1) * 100)
                 profit_color = Fore.GREEN if profit_pct > 0 else Fore.RED
-                print(f"{Fore.CYAN}Active {Fore.GREEN if is_long else Fore.RED}{state['position_side'].upper()} position: Entry={entry_price:.4f}, Current={price:.4f}, SL={stop_loss_price:.4f}, TP={target_price:.4f}, P/L: {profit_color}{profit_pct:.2f}%")
+                print(f"{Fore.CYAN}Active {Fore.GREEN if is_long else Fore.RED}{state['position_side'].upper()} position: Entry={entry_price:.4f}, Current={price:.4f}, SL={stop_loss_price:.4f}, TP={target_price:.4f}, TSL={trailing_stop_level:.4f}, P/L: {profit_color}{profit_pct:.2f}%")
                 logging.info("Holding position. No exit signal.")
         # --- ENTRY LOGIC --- #
         elif not state.get('active_trade', False):
@@ -224,14 +233,17 @@ def bot_logic():
                     target_price = price + price * PROFIT_TARGET_PCT
                     highest = price
                     lowest = None
+                    trailing_stop_level = highest - max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                 else:
                     stop_loss_price = price + max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                     target_price = price - price * PROFIT_TARGET_PCT
                     highest = None
                     lowest = price
+                    trailing_stop_level = lowest + max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                 price_decimals = step_to_decimals(PRICE_PRECISION)
                 stop_loss_price = float(f"{stop_loss_price:.{price_decimals}f}")
                 target_price = float(f"{target_price:.{price_decimals}f}")
+                trailing_stop_level = float(f"{trailing_stop_level:.{price_decimals}f}")
                 new_state = {
                     "active_trade": True,
                     "position_side": pos_side,
@@ -239,10 +251,11 @@ def bot_logic():
                     "stop_loss_price": stop_loss_price,
                     "target_price": target_price,
                     "highest": highest,
-                    "lowest": lowest
+                    "lowest": lowest,
+                    "trailing_stop_level": trailing_stop_level
                 }
                 set_state(new_state)
-                print(f"{Fore.YELLOW}Stop loss set at: {stop_loss_price:.4f}, Target: {target_price:.4f}")
+                print(f"{Fore.YELLOW}Stop loss set at: {stop_loss_price:.4f}, Target: {target_price:.4f}, Initial Trailing Stop: {trailing_stop_level:.4f}")
                 logging.info(f"State updated: {new_state}")
                 time.sleep(5)
             except ccxt.InsufficientFunds as e:
