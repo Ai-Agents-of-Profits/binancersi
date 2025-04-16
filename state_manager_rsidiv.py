@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import portalocker
 
 DEFAULT_STATE = {
     "active_trade": False,
@@ -8,9 +9,12 @@ DEFAULT_STATE = {
     "entry_price": None,
     "stop_loss_price": None,  # Initial stop loss
     "target_price": None,
-    "trailing_stop_level": None,  # Explicit trailing stop
     "highest": None,
-    "lowest": None
+    "lowest": None,
+    "trailing_stop_level": None,
+    "sl_order_id": None,
+    "tp_order_id": None,
+    "ts_order_id": None
 }
 STATE_FILE = 'state_rsidiv.json'
 
@@ -33,7 +37,9 @@ def get_state():
     initialize_state()
     try:
         with open(state_file, 'r') as f:
+            portalocker.lock(f, portalocker.LOCK_SH)
             state = json.load(f)
+            portalocker.unlock(f)
             # Validate state keys
             for k in DEFAULT_STATE:
                 if k not in state:
@@ -54,7 +60,9 @@ def set_state(new_state):
             new_state[k] = DEFAULT_STATE[k]
     try:
         with open(state_file, 'w') as f:
+            portalocker.lock(f, portalocker.LOCK_EX)
             json.dump(new_state, f, indent=4)
+            portalocker.unlock(f)
     except Exception as e:
         logging.error(f"Error saving state to {state_file}: {e}")
 
