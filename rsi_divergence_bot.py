@@ -73,7 +73,10 @@ try:
     market = exchange.market(SYMBOL)
     AMOUNT_PRECISION = market['precision']['amount']
     PRICE_PRECISION = market['precision']['price']
-    logging.info(f"Connected to Binance Futures. Amount precision: {AMOUNT_PRECISION}, Price precision: {PRICE_PRECISION}")
+    # Integrate notional and amount minimum logic
+    MIN_AMOUNT = market['limits']['amount']['min']
+    MIN_NOTIONAL = market['limits']['cost']['min'] or 5  # fallback to 5 if not set
+    logging.info(f"Connected to Binance Futures. Amount precision: {AMOUNT_PRECISION}, Price precision: {PRICE_PRECISION}, Min amount: {MIN_AMOUNT}, Min notional: {MIN_NOTIONAL}")
 except Exception as e:
     logging.critical(f"Exchange setup failed: {e}", exc_info=True)
     exit()
@@ -223,16 +226,24 @@ def bot_logic():
                 logging.info("No entry conditions met.")
                 return
             try:
-                amount = ORDER_SIZE_USD / price
+                # --- Robust order sizing: ensure min amount and min notional ---
+                min_amount = MIN_AMOUNT
+                min_notional = MIN_NOTIONAL
+                price_decimals = step_to_decimals(PRICE_PRECISION)
                 amount_decimals = step_to_decimals(AMOUNT_PRECISION)
-                amount_str = f"{amount:.{amount_decimals}f}"
-                amount_float = float(amount_str)
-                if amount_float <= 0:
-                    logging.error(f"Calculated amount {amount_float} invalid. Skipping entry.")
+                # Calculate minimum USD size to meet notional
+                min_usd = min_notional * 1.1
+                order_size_usd = max(ORDER_SIZE_USD, min_usd)
+                amount = order_size_usd / price
+                amount = float(f"{amount:.{amount_decimals}f}")
+                # Final checks
+                if amount < min_amount or (amount * price) < min_notional:
+                    logging.error(f"Calculated amount {amount} (notional ${amount*price:.2f}) is below Binance minimums (amount {min_amount}, notional ${min_notional}). Skipping entry.")
+                    print(f"{Fore.RED}{Style.BRIGHT}Order size too small for Binance minimums. Skipping entry.{Style.RESET_ALL}")
                     return
-                logging.info(f"Attempting {side.upper()} entry: {amount_str} {SYMBOL.split('/')[0]} @ Market")
+                logging.info(f"Attempting {side.upper()} entry: {amount} {SYMBOL.split('/')[0]} @ Market (min amount: {min_amount}, min notional: {min_notional})")
                 params = {} # No special params needed for Binance entry
-                order = exchange.create_market_order(SYMBOL, side, amount_float, params=params)
+                order = exchange.create_market_order(SYMBOL, side, amount, params=params)
                 logging.info(f"Entry order placed: {order.get('id', 'N/A')}")
                 print(f"{Fore.GREEN}Entry order placed: {order.get('id', 'N/A')}")
                 # Set stop loss and target
@@ -248,7 +259,6 @@ def bot_logic():
                     highest = None
                     lowest = price
                     trailing_stop_level = lowest + max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
-                price_decimals = step_to_decimals(PRICE_PRECISION)
                 stop_loss_price = float(f"{stop_loss_price:.{price_decimals}f}")
                 target_price = float(f"{target_price:.{price_decimals}f}")
                 trailing_stop_level = float(f"{trailing_stop_level:.{price_decimals}f}")
@@ -259,23 +269,23 @@ def bot_logic():
                     if side == 'buy':
                         # Stop loss (sell stop market)
                         sl_order = exchange.create_order(
-                            SYMBOL, 'STOP_MARKET', 'sell', amount_float, None,
+                            SYMBOL, 'STOP_MARKET', 'sell', amount, None,
                             {'stopPrice': stop_loss_price, 'reduceOnly': True}
                         )
                         # Take profit (sell limit)
                         tp_order = exchange.create_order(
-                            SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', amount_float, None,
+                            SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', amount, None,
                             {'stopPrice': target_price, 'reduceOnly': True}
                         )
                     else:
                         # Stop loss (buy stop market)
                         sl_order = exchange.create_order(
-                            SYMBOL, 'STOP_MARKET', 'buy', amount_float, None,
+                            SYMBOL, 'STOP_MARKET', 'buy', amount, None,
                             {'stopPrice': stop_loss_price, 'reduceOnly': True}
                         )
                         # Take profit (buy limit)
                         tp_order = exchange.create_order(
-                            SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', amount_float, None,
+                            SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', amount, None,
                             {'stopPrice': target_price, 'reduceOnly': True}
                         )
                     logging.info(f"Exchange SL order placed: {sl_order.get('id', 'N/A')}")
