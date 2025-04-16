@@ -260,7 +260,7 @@ def bot_logic():
                 time.sleep(5)
             except ccxt.InsufficientFunds as e:
                 logging.error(f"Insufficient funds for entry: {e}")
-                print(f"{Fore.RED}{Style.BRIGHT}Insufficient funds for entry: {e}{Style.RESET_ALL}")
+                print(f"{Fore.RED}{Style.BRIGHT}Insufficient fundss for entry: {e}{Style.RESET_ALL}")
             except Exception as e:
                 logging.error(f"Entry error: {e}", exc_info=True)
                 print(f"{Fore.RED}{Style.BRIGHT}Entry error: {e}{Style.RESET_ALL}")
