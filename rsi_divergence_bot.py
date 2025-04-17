@@ -239,22 +239,39 @@ def bot_logic():
                     print(f"{Fore.RED}{Style.BRIGHT}Order size too small for Binance minimums. Skipping entry.{Style.RESET_ALL}")
                     return
                 logging.info(f"Attempting {side.upper()} entry: {amount} {SYMBOL.split('/')[0]} @ Market (min amount: {min_amount}, min notional: {min_notional})")
-                params = {} 
+                params = {}
                 order = exchange.create_market_order(SYMBOL, side, amount, params=params)
                 logging.info(f"Entry order placed: {order.get('id', 'N/A')}")
                 print(f"{Fore.GREEN}Entry order placed: {order.get('id', 'N/A')}")
+                # --- Place SL/TP orders on the exchange ---
                 if side == 'buy':
                     stop_loss_price = price - max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                     target_price = price + price * PROFIT_TARGET_PCT
                     highest = price
                     lowest = None
                     trailing_stop_level = highest - max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
+                    sl_order = exchange.create_order(
+                        SYMBOL, 'STOP_MARKET', 'sell', amount, None,
+                        {'stopPrice': stop_loss_price, 'reduceOnly': True}
+                    )
+                    tp_order = exchange.create_order(
+                        SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', amount, None,
+                        {'stopPrice': target_price, 'reduceOnly': True}
+                    )
                 else:
                     stop_loss_price = price + max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
                     target_price = price - price * PROFIT_TARGET_PCT
                     highest = None
                     lowest = price
                     trailing_stop_level = lowest + max(ATR_MULTIPLIER * atr_val, price * STOP_LOSS_PCT)
+                    sl_order = exchange.create_order(
+                        SYMBOL, 'STOP_MARKET', 'buy', amount, None,
+                        {'stopPrice': stop_loss_price, 'reduceOnly': True}
+                    )
+                    tp_order = exchange.create_order(
+                        SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', amount, None,
+                        {'stopPrice': target_price, 'reduceOnly': True}
+                    )
                 stop_loss_price = float(f"{stop_loss_price:.{price_decimals}f}")
                 target_price = float(f"{target_price:.{price_decimals}f}")
                 trailing_stop_level = float(f"{trailing_stop_level:.{price_decimals}f}")
@@ -267,13 +284,15 @@ def bot_logic():
                     "highest": highest,
                     "lowest": lowest,
                     "trailing_stop_level": trailing_stop_level,
-                    "sl_order_id": None,
-                    "tp_order_id": None,
+                    "sl_order_id": sl_order.get('id'),
+                    "tp_order_id": tp_order.get('id'),
                     "atr_at_entry": atr_val,
                     "closing": False
                 }
                 set_state(new_state)
                 print(f"{Fore.YELLOW}Stop loss set at: {stop_loss_price:.4f}, Target: {target_price:.4f}, Initial Trailing Stop: {trailing_stop_level:.4f}")
+                logging.info(f"SL order placed: {sl_order.get('id', 'N/A')} at {stop_loss_price}")
+                logging.info(f"TP order placed: {tp_order.get('id', 'N/A')} at {target_price}")
                 logging.info(f"State updated: {new_state}")
                 time.sleep(5)
             except ccxt.InsufficientFunds as e:
